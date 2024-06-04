@@ -1,22 +1,56 @@
 """Methods to build the toctree used in the html pages."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from itertools import count
 from textwrap import dedent
 from typing import Iterator, List, Tuple, Union
 from urllib.parse import urlparse
+import sys
 
 import sphinx
 from bs4 import BeautifulSoup
 from docutils import nodes
-from docutils.nodes import Node
+from docutils.nodes import Node, bullet_list
 from sphinx.addnodes import toctree as TocTreeNodeClass
 from sphinx.application import Sphinx
+from sphinx.builders import Builder
+from sphinx.environment import BuildEnvironment
 from sphinx.environment.adapters.toctree import TocTree
 from sphinx.locale import _
 
 from .utils import traverse_or_findall
+
+
+class StoredEnv:
+
+    def store_env(self, app, env: BuildEnvironment):
+        self.env: BuildEnvironment = deepcopy(env)
+        self.root_toctree: TocTree = TocTree(env)
+        self.builder: Builder = app.builder
+        # NOTE: `env.tocs` is a dict mapping pagenames to hierarchical bullet-lists
+        # ("nodetrees" in Sphinx parlance) of in-page headings (including `toctree::`
+        # directives). Thus the `tocs` of `root_doc` yields the top-level pages that sit
+        # just below the root of our site
+        self.root_toc: bullet_list = env.tocs[app.config.root_doc]
+        self.titles = app.env.titles
+
+    def add_toctree_functions(
+        self,
+        app: Sphinx,
+        pagename: str,
+        templatename: str,
+        context,
+        doctree,
+    ):
+        return add_toctree_functions(
+            self,
+            pagename=pagename,
+            templatename=templatename,
+            context=context,
+            doctree=doctree,
+        )
 
 
 def add_inline_math(node: Node) -> str:
@@ -33,24 +67,36 @@ def add_inline_math(node: Node) -> str:
     )
 
 
-def _get_ancestor_pagename(app: Sphinx, pagename: str, startdepth: int) -> str:
-    """Get the name of `pagename`'s ancestor that is rooted `startdepth` levels below the global root."""
-    toctree = TocTree(app.env)
+def _toctree_ancestors(toctree: TocTree, pagename: str) -> List[str]:
     if sphinx.version_info[:2] >= (7, 2):
         from sphinx.environment.adapters.toctree import _get_toctree_ancestors
 
-        ancestors = [*_get_toctree_ancestors(app.env.toctree_includes, pagename)]
+        ancestors = [*_get_toctree_ancestors(toctree.env.toctree_includes, pagename)]
     else:
         ancestors = toctree.get_toctree_ancestors(pagename)
+    return ancestors
+
+
+def _get_ancestor_pagename(
+    *,
+    root_toctree: TocTree,
+    pagename: str,
+    startdepth: int,
+) -> str:
+    """Get the name of `pagename`'s ancestor that is rooted `startdepth` levels below the global root."""
+    ancestors = _toctree_ancestors(root_toctree, pagename)
     try:
         out = ancestors[-startdepth]
     except IndexError:
         # eg for index.rst, but also special pages such as genindex, py-modindex, search
         # those pages don't have a "current" element in the toctree, so we can
         # directly return None instead of using the default sphinx
-        # toctree.get_toctree_for(pagename, app.builder, collapse, **kwargs)
+        # toctree.get_toctree_for(pagename, builder, collapse, **kwargs)
         out = None
-    return out, toctree
+    else:
+        if "reference/generated" in pagename and not out.startswith("reference/"):
+            print(f"EXPECT BADNESS for {pagename=}, ancestorname={out}, {startdepth=} with {ancestors=}", file=sys.__stderr__)
+    return out
 
 
 @dataclass
@@ -64,9 +110,20 @@ class LinkInfo:
 
 
 def add_toctree_functions(
-    app: Sphinx, pagename: str, templatename: str, context, doctree
+    stored_env: StoredEnv, pagename: str, templatename: str, context, doctree
 ) -> None:
     """Add functions so Jinja templates can add toctree objects."""
+    builder = stored_env.builder
+    # NOTE: `env.tocs` is a dict mapping pagenames to hierarchical bullet-lists
+    # ("nodetrees" in Sphinx parlance) of in-page headings (including `toctree::`
+    # directives). Thus the `tocs` of `root_doc` yields the top-level pages that sit
+    # just below the root of our site
+    root_toc = stored_env.root_toc
+    titles = stored_env.titles
+    context_toctree = deepcopy(context["toctree"])
+    context_toc = deepcopy(context.get("toc", None))
+    root_toctree = stored_env.root_toctree
+    del stored_env, templatename, doctree
 
     def suppress_sidebar_toctree(startdepth: int = 1, **kwargs):
         """Check if there's a sidebar TocTree that needs to be rendered.
@@ -78,8 +135,10 @@ def add_toctree_functions(
 
             kwargs : passed to the Sphinx `toctree` template function.
         """
-        ancestorname, toctree_obj = _get_ancestor_pagename(
-            app=app, pagename=pagename, startdepth=startdepth
+        ancestorname = _get_ancestor_pagename(
+            root_toctree=root_toctree,
+            pagename=pagename,
+            startdepth=startdepth,
         )
         if ancestorname is None:
             return True  # suppress
@@ -92,7 +151,7 @@ def add_toctree_functions(
         # there's a TocTree fragment that should be shown on this page; unfortunately we
         # must resolve the whole TOC subtree to find out
         toctree = get_nonroot_toctree(
-            app, pagename, ancestorname, toctree_obj, **kwargs
+            builder, pagename, ancestorname, root_toctree, **kwargs
         )
         return toctree is None
 
@@ -105,7 +164,7 @@ def add_toctree_functions(
                 yield f"{base_id}-{n}"
 
     def unique_html_id(base_id: str):
-        """Create an id that is unique from other ids created by this function at build time.
+        """Create an id that is unique from other ids created by this function per page.
 
         The function works by sequentially returning "<base_id>", "<base_id>-2",
         "<base_id>-3", etc. each time it is called.
@@ -120,30 +179,14 @@ def add_toctree_functions(
         should make it slightly easier to generate different html snippet for
         sidebar or navbar.
         """
-        toctree = TocTree(app.env)
-
         # Find the active header navigation item so we decide whether to highlight
         # Will be empty if there is no active page (root_doc, or genindex etc)
-        if sphinx.version_info[:2] >= (7, 2):
-            from sphinx.environment.adapters.toctree import _get_toctree_ancestors
-
-            # NOTE: `env.toctree_includes` is a dict mapping pagenames to any (possibly
-            # hidden) TocTree directives on that page (i.e., the "child" pages nested
-            # under `pagename`).
-            header_pages = [*_get_toctree_ancestors(app.env.toctree_includes, pagename)]
-        else:
-            header_pages = toctree.get_toctree_ancestors(pagename)
+        header_pages = _toctree_ancestors(root_toctree, pagename)
         if header_pages:
             # The final list item will be the top-most ancestor
             active_header_page = header_pages[-1]
         else:
             active_header_page = None
-
-        # NOTE: `env.tocs` is a dict mapping pagenames to hierarchical bullet-lists
-        # ("nodetrees" in Sphinx parlance) of in-page headings (including `toctree::`
-        # directives). Thus the `tocs` of `root_doc` yields the top-level pages that sit
-        # just below the root of our site
-        root_toc = app.env.tocs[app.config.root_doc]
 
         links_data = []
 
@@ -161,7 +204,7 @@ def add_toctree_functions(
                 # sanitize page title for use in the html output if needed
                 if title is None:
                     title = ""
-                    for node in app.env.titles[page].children:
+                    for node in titles[page].children:
                         if isinstance(node, nodes.math):
                             title += add_inline_math(node)
                         else:
@@ -281,7 +324,7 @@ def add_toctree_functions(
         )
 
         if links_dropdown:
-            dropdown_id = unique_html_id("pst-nav-more-links")
+            dropdown_id = unique_html_id("pst-nav-more-links", pagename=pagename)
             links_dropdown_html = "\n".join(links_dropdown)
             out += f"""
             <li class="nav-item dropdown pst-header-nav-item">
@@ -300,7 +343,7 @@ def add_toctree_functions(
     # somehow runs this twice in some circumstances in unpredictable ways.
     @cache
     def generate_toctree_html(
-        kind: str, startdepth: int = 1, show_nav_level: int = 1, **kwargs
+        kind: str, *, startdepth: int = 1, show_nav_level: int = 1, **kwargs
     ) -> Union[BeautifulSoup, str]:
         """Return the navigation link structure in HTML.
 
@@ -326,11 +369,11 @@ def add_toctree_functions(
             HTML string (if kind == "sidebar") OR BeautifulSoup object (if kind == "raw")
         """
         if startdepth == 0:
-            html_toctree = context["toctree"](**kwargs)
+            html_toctree = context_toctree(**kwargs)
         else:
             # find relevant ancestor page; some pages (search, genindex) won't have one
-            ancestorname, toctree_obj = _get_ancestor_pagename(
-                app=app, pagename=pagename, startdepth=startdepth
+            ancestorname = _get_ancestor_pagename(
+                root_toctree=root_toctree, pagename=pagename, startdepth=startdepth
             )
             if ancestorname is None:
                 raise RuntimeError(
@@ -339,10 +382,17 @@ def add_toctree_functions(
                     "developers."
                 )
             # select the "active" subset of the navigation tree for the sidebar
+
             toctree_element = get_nonroot_toctree(
-                app, pagename, ancestorname, toctree_obj, **kwargs
+                builder, pagename, ancestorname, root_toctree, **kwargs
             )
-            html_toctree = app.builder.render_partial(toctree_element)["fragment"]
+            html_toctree = builder.render_partial(toctree_element)["fragment"]
+
+        if "stats.sampling" in pagename:
+            if "scipy.stats" not in html_toctree:
+                raise RuntimeError(pagename, ancestorname)
+            else:
+                print(f"USING {ancestorname=}", file=sys.__stderr__)
 
         soup = BeautifulSoup(html_toctree, "html.parser")
 
@@ -397,10 +447,10 @@ def add_toctree_functions(
     @cache
     def generate_toc_html(kind: str = "html") -> BeautifulSoup:
         """Return the within-page TOC links in HTML."""
-        if "toc" not in context:
+        if context_toc is None:
             return ""
 
-        soup = BeautifulSoup(context["toc"], "html.parser")
+        soup = BeautifulSoup(context_toc, "html.parser")
 
         # Add toc-hN + visible classes
         def add_header_level_recursive(ul, level):
@@ -570,7 +620,7 @@ def add_collapse_checkboxes(soup: BeautifulSoup) -> None:
 
 
 def get_nonroot_toctree(
-    app: Sphinx, pagename: str, ancestorname: str, toctree, **kwargs
+    builder: Builder, pagename: str, ancestorname: str, root_toctree: TocTree, **kwargs
 ):
     """Get the partial TocTree (rooted at `ancestorname`) that dominates `pagename`.
 
@@ -594,7 +644,7 @@ def get_nonroot_toctree(
         kwargs["maxdepth"] = 0
     kwargs["maxdepth"] = int(kwargs["maxdepth"])
     # starting from ancestor page, recursively parse `toctree::` elements
-    ancestor_doctree = toctree.env.tocs[ancestorname].deepcopy()
+    ancestor_doctree = root_toctree.env.tocs[ancestorname].deepcopy()
     toctrees = []
 
     # for each `toctree::` directive in the ancestor page...
@@ -603,18 +653,20 @@ def get_nonroot_toctree(
         #              once docutils min version >=0.18.1
 
         # ... resolve that `toctree::` (recursively get children, prune, collapse, etc)
-        resolved_toctree = toctree.resolve(
+        resolved_toctree = root_toctree.resolve(
             docname=pagename,
-            builder=app.builder,
+            builder=builder,
             toctree=toctree_node,
             **kwargs,
         )
         # ... keep the non-empty ones
         if resolved_toctree:
-            toctrees.append(resolved_toctree)
+            toctrees.append(resolved_toctree.deepcopy())
     if not toctrees:
         return None
     # ... and merge them into a single entity
+    # We have to be careful here because Element.extend calls node.append which
+    # internally modifies item.parent etc. in place, hence why we deepcopy() above.
     result = toctrees[0]
     for resolved_toctree in toctrees[1:]:
         result.extend(resolved_toctree.children)

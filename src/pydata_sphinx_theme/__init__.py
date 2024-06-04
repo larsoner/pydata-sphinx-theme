@@ -271,11 +271,14 @@ def setup(app: Sphinx) -> Dict[str, str]:
 
     app.add_post_transform(short_link.ShortenLinkTransform)
 
+    stored_env = toctree.StoredEnv()
+
     app.connect("builder-inited", translator.setup_translators)
     app.connect("builder-inited", update_config)
+    app.connect("env-updated", stored_env.store_env)
     app.connect("html-page-context", _fix_canonical_url)
     app.connect("html-page-context", edit_this_page.setup_edit_url)
-    app.connect("html-page-context", toctree.add_toctree_functions)
+    app.connect("html-page-context", stored_env.add_toctree_functions)
     app.connect("html-page-context", update_and_remove_templates)
     app.connect("html-page-context", logo.setup_logo_path)
     app.connect("html-page-context", utils.set_secondary_sidebar_items)
