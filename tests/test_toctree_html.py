@@ -268,8 +268,8 @@ def test_template_moves_current_markers(parts, show_nav_level) -> None:
     template = build_template(root, show_nav_level=show_nav_level, self_href=built_for)
     # the template must reproduce the page it was built for (this is what
     # generate_toctree_html checks before caching it)
-    assert template.render(built_for, built_for) == render_toctree(root)
-    assert template.render("", built_for) == render_toctree(root)
+    assert template.render(built_for) == render_toctree(root)
+    assert template.render("") == render_toctree(root)
     for href in ALL_HREFS:
         expected = render_toctree(
             rewrite_toctree(
@@ -278,8 +278,8 @@ def test_template_moves_current_markers(parts, show_nav_level) -> None:
                 show_nav_level=show_nav_level,
             )
         )
-        assert template.render(href, built_for) == expected, href
-    assert template.render("not-an-entry.html", built_for) is None
+        assert template.render(href) == expected, href
+    assert template.render("not-an-entry.html") is None
 
 
 def bs4_page_toc_reference(html: str, show_toc_level: int, kind: str):

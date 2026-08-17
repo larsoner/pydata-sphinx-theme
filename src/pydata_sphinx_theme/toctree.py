@@ -388,16 +388,16 @@ def add_toctree_functions(
         # Resolving and rewriting the sidebar toctree below is expensive on
         # large sites, so where possible we serve it from a cache instead
         # (see _sidebar_cache_key for when, and SidebarTemplate for how)
+        page_uri = builder.get_target_uri(pagename)
         cache_key = _sidebar_cache_key(
-            kind, ancestorname, pagename, show_nav_level, kwargs
+            kind, ancestorname, page_uri, show_nav_level, kwargs
         )
         if cache_key is not None:
             cached = _sidebar_cache(app).get(cache_key)
             if cached is not None:
                 template, cached_pagename = cached
                 cached_html = template.render(
-                    builder.get_relative_uri(cached_pagename, pagename),
-                    builder.get_relative_uri(pagename, cached_pagename),
+                    builder.get_relative_uri(cached_pagename, pagename)
                 )
                 if cached_html is not None:
                     return cached_html
@@ -417,11 +417,11 @@ def add_toctree_functions(
         if cache_key is not None:
             # `self_href` is where this page's own entry points from a sibling
             # page in the same directory (in the sidebar it is rendered as "#")
-            self_href = posixpath.basename(builder.get_target_uri(pagename))
+            self_href = posixpath.basename(page_uri)
             template = build_template(
                 root, show_nav_level=show_nav_level, self_href=self_href
             )
-            if template.render(self_href, self_href) == html:
+            if template.render(self_href) == html:
                 # Only cache a template that reproduces this page's own sidebar
                 # exactly. It won't if this page has no entry of its own (e.g.
                 # it was pruned by `maxdepth`), or in the unlikely event that
@@ -480,7 +480,7 @@ def add_toctree_functions(
 def _sidebar_cache_key(
     kind: str,
     ancestorname: str | None,
-    pagename: str,
+    page_uri: str,
     show_nav_level: int,
     kwargs: dict,
 ) -> tuple | None:
@@ -491,16 +491,23 @@ def _sidebar_cache_key(
     `collapse=True`), the resolved toctree has the same structure for every page
     under the same ancestor -- only the "current" markers (`current`/`active`
     classes and open `<details>`) and the relative link targets differ. So the
-    finished HTML can be shared by all pages in the same directory (same
-    relative link targets) below the same ancestor, provided the "current"
-    markers are moved to each page's own toctree entry
+    finished HTML can be shared by all pages written to the same output
+    directory (same relative link targets) below the same ancestor, provided the
+    "current" markers are moved to each page's own toctree entry
     (`_toctree_html.SidebarTemplate.render`).
+
+    `page_uri` is this page's output URI (`builder.get_target_uri()`), not its
+    docname: builders whose page URIs are directories rather than files (e.g.
+    "dirhtml") give every page its own output directory, so no two pages can
+    share a sidebar and nothing is cached for them.
     """
     if kind != "sidebar" or ancestorname is None or kwargs.get("collapse", True):
         return None
+    if not page_uri or page_uri.endswith("/"):
+        return None
     return (
         ancestorname,
-        posixpath.dirname(pagename),
+        posixpath.dirname(page_uri),
         show_nav_level,
         tuple(sorted(kwargs.items())),
     )

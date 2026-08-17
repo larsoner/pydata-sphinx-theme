@@ -577,43 +577,34 @@ class SidebarTemplate:
     ``html`` is the finished sidebar for one page of a directory, with every
     "current page" marker removed. ``slots[i]`` is ``(start, end, replacement)``
     -- replacing ``html[start:end]`` with ``replacement`` re-adds one marker --
-    and ``by_href`` maps the href of each entry to the slots that mark that
-    entry (and its ancestors) as the current page. ``self_anchors`` re-points
-    the entries of the page ``html`` was built for, whose relative href depends
-    on the page being rendered.
+    and ``by_href`` maps the href of each entry to the (ascending) slots that
+    mark that entry, and its ancestors, as the current page.
     """
 
-    __slots__ = ("by_href", "html", "self_anchors", "slots")
+    __slots__ = ("by_href", "html", "slots")
 
-    def __init__(self, html: str, slots: list, by_href: dict, self_anchors: list):
+    def __init__(self, html: str, slots: list, by_href: dict):
         self.html = html
         self.slots = slots
         self.by_href = by_href
-        self.self_anchors = self_anchors
 
-    def render(self, href_new: str, href_old: str) -> str | None:
-        """Return the sidebar with the current-page markers moved to ``href_new``.
+    def render(self, href: str) -> str | None:
+        """Return the sidebar with the current-page markers moved to ``href``.
 
-        ``href_old`` is where the page this template was built for lives, as
-        seen from the page being rendered. Returns None if there is no entry for
-        ``href_new`` (e.g. it was pruned by ``maxdepth``), in which case the
-        caller has to build the sidebar the slow way.
+        ``href`` is the entry for the page being rendered, as seen from the page
+        this template was built for. Returns None if there is no such entry
+        (e.g. it was pruned by ``maxdepth``), in which case the caller has to
+        build the sidebar the slow way.
         """
-        indices = self.by_href.get(href_new)
+        indices = self.by_href.get(href)
         if indices is None:
             return None
-        edits = {}
-        for start, end, prefix, suffix in self.self_anchors:
-            edits[start] = (end, prefix + _quote_attr(href_old) + suffix)
-        slots = self.slots
-        for index in indices:
-            start, end, replacement = slots[index]
-            edits[start] = (end, replacement)
         html = self.html
+        slots = self.slots
         out = []
         position = 0
-        for start in sorted(edits):
-            end, replacement = edits[start]
+        for index in indices:
+            start, end, replacement = slots[index]
             out.append(html[position:start])
             out.append(replacement)
             position = end
@@ -631,7 +622,6 @@ class _TemplateBuilder:
         self.position = 0
         self.slots = []
         self.slot_of = {}
-        self.self_anchors = []
 
     def emit(self, text: str) -> None:
         """Append literal text to the output."""
@@ -662,9 +652,7 @@ class _TemplateBuilder:
         if self.self_href in by_href:
             # `get_relative_uri(page, page)` is "", not the page's own basename
             by_href[""] = by_href[self.self_href]
-        return SidebarTemplate(
-            "".join(self.out), self.slots, by_href, self.self_anchors
-        )
+        return SidebarTemplate("".join(self.out), self.slots, by_href)
 
     def _walk(self, element: _Element, slotted: set) -> None:
         for child in element.children:
@@ -684,27 +672,24 @@ class _TemplateBuilder:
                 self.emit(f"</{child.name}>")
 
     def _emit_slot(self, element: _Element, attrs: dict) -> None:
-        is_self_anchor = element.name == "a" and attrs["href"] == "#"
-        if is_self_anchor:
+        if element.name == "a" and attrs["href"] == "#":
+            # in the baseline this page is not the current one, so its entry
+            # links to itself the way a sibling page would link to it
             attrs = dict(attrs)
             attrs["href"] = self.self_href
         is_part_details = element.name == "details" and (
             "toctree-l0" in element.parent.classes
         )
-        off_tag = element.start_tag(attrs)
-        on_tag = element.start_tag(_markers_on(element, attrs, is_part_details))
         start = self.position
-        self.emit(off_tag)
+        self.emit(element.start_tag(attrs))
         self.slot_of[id(element)] = len(self.slots)
-        self.slots.append((start, self.position, on_tag))
-        if is_self_anchor:
-            # this href has to be recomputed per page for builders whose page
-            # URIs are not flat (e.g. the "dirhtml" builder)
-            quoted = _quote_attr(self.self_href)
-            cut = off_tag.index("href=" + quoted) + len("href=")
-            self.self_anchors.append(
-                (start, self.position, off_tag[:cut], off_tag[cut + len(quoted) :])
+        self.slots.append(
+            (
+                start,
+                self.position,
+                element.start_tag(_markers_on(element, attrs, is_part_details)),
             )
+        )
 
 
 def build_template(

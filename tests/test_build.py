@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import sphinx.errors
 
+from bs4 import BeautifulSoup
+
 from pydata_sphinx_theme.utils import escape_ansi
 
 
@@ -569,16 +571,19 @@ def test_sidebars_show_nav_level0(sphinx_build_factory) -> None:
         assert "open" in ii.attrs
 
 
+@pytest.mark.parametrize("buildername", ["html", "dirhtml"])
 @pytest.mark.parametrize("show_nav_level", [0, 1, 2])
 def test_sidebar_toctree_cache(
-    sphinx_build_factory, make_app, monkeypatch, show_nav_level
+    sphinx_build_factory, make_app, monkeypatch, show_nav_level, buildername
 ):
     """Sidebars served from the cache must be identical to freshly built ones.
 
     With collapse_navigation=False (the default), the sidebar of the second,
     third, ... page written in a given directory is produced by moving the
     "current" markers within a cached sibling page's rendered sidebar instead of
-    being resolved from scratch (see generate_toctree_html).
+    being resolved from scratch (see generate_toctree_html). "dirhtml" is
+    covered too: it gives every page its own output directory, so no two pages
+    can share a sidebar and the cache has to stay out of the way.
     """
     from pydata_sphinx_theme import _toctree_html
 
@@ -593,18 +598,41 @@ def test_sidebar_toctree_cache(
 
     monkeypatch.setattr(_toctree_html.SidebarTemplate, "render", spy)
     confoverrides = {"html_theme_options.show_nav_level": show_nav_level}
-    build = sphinx_build_factory("sidebars", confoverrides=confoverrides).build()
-    assert any(hit is not None for hit in hits), "no sidebar was served from cache"
+    build = sphinx_build_factory(
+        "sidebars", confoverrides=confoverrides, buildername=buildername
+    ).build()
+    if buildername == "html":
+        assert any(hit is not None for hit in hits), "no sidebar served from cache"
+    else:
+        assert not hits, "sidebars must not be shared when page URIs are not flat"
     with_cache = {
         path: path.read_text("utf8") for path in sorted(build.outdir.rglob("*.html"))
     }
+    # every sidebar link must point at a page that actually exists
+    for path, html in with_cache.items():
+        nav = BeautifulSoup(html, "html.parser").select_one("nav.bd-docs-nav")
+        if nav is None:
+            continue
+        for anchor in nav.select("a.reference.internal"):
+            href = anchor["href"]
+            if href == "#":
+                continue
+            target = (path.parent / href).resolve()
+            if target.is_dir():
+                target = target / "index.html"
+            assert target.exists(), f"{path}: dangling sidebar link {href!r}"
 
     # build again from scratch with every cache lookup missing (so each page's
     # sidebar is built the slow way) and check that all pages come out identical
     monkeypatch.setattr(
         _toctree_html.SidebarTemplate, "render", lambda self, *a, **kw: None
     )
-    app = make_app(srcdir=build.src, confoverrides=confoverrides, freshenv=True)
+    app = make_app(
+        srcdir=build.src,
+        confoverrides=confoverrides,
+        buildername=buildername,
+        freshenv=True,
+    )
     app.build()
     for path, cached_html in with_cache.items():
         assert path.read_text("utf8") == cached_html, path
