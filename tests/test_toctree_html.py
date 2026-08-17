@@ -172,12 +172,36 @@ def test_matches_beautifulsoup(name, kind, show_nav_level) -> None:
         '<p class="  a   b  " id="z">t</p>',
         "<!-- a comment --><ul></ul>",
         "<ul><li>unclosed",
+        "<p>a<b>c</p>d</b>",
+        "<li>a</li></ul></ul>",
+        "<UL><LI CLASS='A'>MiXeD</LI></UL>",
+        "<ul><li><a href='x' href='y'>t</a></li></ul>",
+        "<ul><li><a href='' class=''>t</a></li></ul>",
+        "<span data-x='<>&\"'>y</span>",
+        "<details open><summary>s</summary>x</details>",
+        "<ul><li>&#x41;&#66;&Aacute;&copy;</li></ul>",
+        "<ul><li><a href='x'>中文 — dash</a></li></ul>",
+        "<!DOCTYPE html><ul></ul>",
+        "<?pi foo?><ul></ul>",
     ],
 )
 def test_serializer_matches_beautifulsoup(html) -> None:
     """Serialization must match BeautifulSoup's default formatter byte for byte."""
     root = rewrite_toctree(html, kind="raw", show_nav_level=1)
     assert render_toctree(root) == str(BeautifulSoup(html, "html.parser"))
+
+
+def test_unknown_entity_ref() -> None:
+    """Unknown entity references are kept intact (BeautifulSoup drops the ";").
+
+    Sphinx/docutils only ever emit ``&amp;``, ``&lt;``, ``&gt;``, ``&quot;`` and
+    numeric references, so this cannot come up in a real toctree; the test
+    documents the one place we knowingly differ from BeautifulSoup.
+    """
+    html = "a &unknownentity; b"
+    rendered = render_toctree(rewrite_toctree(html, kind="raw", show_nav_level=1))
+    assert rendered == "a &amp;unknownentity; b"
+    assert str(BeautifulSoup(html, "html.parser")) == "a &amp;unknownentity b"
 
 
 # A toctree of five pages in one directory, three of them nested, split over two

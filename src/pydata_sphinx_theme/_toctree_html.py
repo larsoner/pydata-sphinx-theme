@@ -225,8 +225,12 @@ class _TreeParser(HTMLParser):
         self._stack[-1].children.append(_RawText(f"<!--{data}-->"))
 
     def handle_decl(self, decl: str) -> None:
-        """Append a declaration node."""
-        self._stack[-1].children.append(_RawText(f"<!{decl}>"))
+        """Append a declaration node (BeautifulSoup adds the trailing newline)."""
+        self._stack[-1].children.append(_RawText(f"<!{decl}>\n"))
+
+    def handle_pi(self, data: str) -> None:
+        """Append a processing instruction node."""
+        self._stack[-1].children.append(_RawText(f"<?{data}>"))
 
 
 def _text_out(node: str) -> str:
