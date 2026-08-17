@@ -638,6 +638,21 @@ def test_sidebar_toctree_cache(
         assert path.read_text("utf8") == cached_html, path
 
 
+def test_sidebars_single_startdepth0(sphinx_build_factory, file_regression) -> None:
+    """Test a sidebar rooted at the whole site (`startdepth=0`, `collapse=True`).
+
+    That combination bypasses the sidebar cache, and `context["toctree"]()`
+    (unlike the fragment used for `startdepth>0`) also yields entries for the
+    current page's own sub-headings, which the theme drops again.
+    """
+    confoverrides = {"templates_path": ["_templates_single_sidebar"]}
+    sphinx_build = sphinx_build_factory("sidebars", confoverrides=confoverrides).build()
+    sidebar = sphinx_build.html_tree("section1/subsection1/page1.html").select(
+        "nav.bd-docs-nav"
+    )[0]
+    file_regression.check(sidebar.prettify(), extension=".html")
+
+
 def test_included_toc(sphinx_build_factory) -> None:
     """
     Test that Sphinx project containing TOC (.. toctree::) included via .. include::
