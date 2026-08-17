@@ -6,7 +6,9 @@ from bs4 import BeautifulSoup
 
 from pydata_sphinx_theme._toctree_html import (
     build_template,
+    render_page_toc,
     render_toctree,
+    rewrite_page_toc,
     rewrite_toctree,
 )
 from pydata_sphinx_theme.toctree import add_collapse_checkboxes
@@ -254,3 +256,82 @@ def test_template_moves_current_markers(parts, show_nav_level) -> None:
         )
         assert template.render(href, built_for) == expected, href
     assert template.render("not-an-entry.html", built_for) is None
+
+
+def bs4_page_toc_reference(html: str, show_toc_level: int, kind: str):
+    """Rewrite the in-page TOC the way the theme did with BeautifulSoup."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    def add_header_level_recursive(ul, level):
+        if ul is None:
+            return
+        if level <= (show_toc_level + 1):
+            ul["class"] = [*ul.get("class", []), "pst-show_toc_level"]
+        for li in ul("li", recursive=False):
+            li["class"] = [*li.get("class", []), f"toc-h{level}"]
+            add_header_level_recursive(li.find("ul", recursive=False), level + 1)
+
+    add_header_level_recursive(soup.find("ul"), 1)
+    for ul in soup("ul"):
+        ul["class"] = [*ul.get("class", []), "nav", "section-nav", "flex-column"]
+    for li in soup("li"):
+        li["class"] = [*li.get("class", []), "nav-item", "toc-entry"]
+        if li.find("a"):
+            li.find("a")["class"] = [*li.find("a").get("class", []), "nav-link"]
+    if kind != "html":
+        return soup
+    h1_headers = soup.select(".toc-h1")
+    if len(h1_headers) == 1:
+        title = h1_headers[0]
+        return "" if not title.select(".toc-h2") else title.find("ul")
+    return soup
+
+
+def _toc(items):
+    return "<ul>\n" + "".join(items) + "</ul>\n"
+
+
+def _toc_item(href, title, children=""):
+    return (
+        f'<li><a class="reference internal" href="{href}">{title}</a>{children}</li>\n'
+    )
+
+
+PAGE_TOCS = {
+    # a single h1 (the page title) with sub-headers: only the sub-list is shown
+    "title_with_subs": _toc(
+        [
+            _toc_item(
+                "#",
+                "The title",
+                _toc(
+                    [
+                        _toc_item("#one", "One", _toc([_toc_item("#one-a", "One A")])),
+                        _toc_item("#two", "Two"),
+                    ]
+                ),
+            )
+        ]
+    ),
+    # a single h1 with no sub-headers: no TOC at all
+    "title_only": _toc([_toc_item("#", "The title")]),
+    # several h1s: they are treated as sections
+    "many_h1": _toc([_toc_item("#a", "A"), _toc_item("#b", "B")]),
+    "empty": "",
+    "whitespace": "\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(PAGE_TOCS))
+@pytest.mark.parametrize("show_toc_level", [1, 2, 3])
+@pytest.mark.parametrize("kind", ["html", "raw"])
+def test_page_toc_matches_beautifulsoup(name, show_toc_level, kind) -> None:
+    """The in-page TOC rewriter must match the old BeautifulSoup pipeline."""
+    html = PAGE_TOCS[name]
+    expected = bs4_page_toc_reference(html, show_toc_level, kind)
+    root = rewrite_page_toc(html, show_toc_level=show_toc_level)
+    got = render_page_toc(root) if kind == "html" else render_toctree(root)
+    assert got == str(expected)
+    # the template only renders the TOC when it is non-empty; that decision must
+    # not change either
+    assert (len(got) >= 1) == (len(expected) >= 1)

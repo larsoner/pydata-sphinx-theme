@@ -170,6 +170,14 @@ class _Element:
                 yield child
             yield from child.iter_descendants(name)
 
+    def iter_all(self):
+        """Yield all descendant elements in document order."""
+        for child in self.children:
+            if isinstance(child, str):
+                continue
+            yield child
+            yield from child.iter_all()
+
     def adopt(self, children: list) -> None:
         """Take over ``children``, re-parenting the elements among them."""
         self.children = children
@@ -414,6 +422,66 @@ def render_toctree(root: _Element) -> str:
     out = []
     _serialize(root, out)
     return "".join(out)
+
+
+def render_element(element: _Element) -> str:
+    """Serialize a single element (tag included) and its subtree."""
+    out = [element.start_tag()]
+    if element.name not in _VOID_ELEMENTS:
+        _serialize(element, out)
+        out.append(f"</{element.name}>")
+    return "".join(out)
+
+
+# -- the in-page ("On this page") table of contents ---------------------------
+
+
+def _add_header_levels(ul: _Element | None, level: int, show_toc_level: int) -> None:
+    """Add ``toc-hN`` (and visibility) classes to a nested ``<ul>``."""
+    if ul is None:
+        return
+    if level <= show_toc_level + 1:
+        ul.attrs["class"] = [*ul.classes, "pst-show_toc_level"]
+    for item in ul.iter_children():
+        if item.name != "li":
+            continue
+        item.attrs["class"] = [*item.classes, f"toc-h{level}"]
+        _add_header_levels(item.find_child("ul"), level + 1, show_toc_level)
+
+
+def rewrite_page_toc(html: str, *, show_toc_level: int) -> _Element:
+    """Parse and rewrite Sphinx's in-page TOC; return the document root."""
+    parser = _TreeParser()
+    parser.feed(html)
+    parser.close()
+    root = parser.root
+    _add_header_levels(root.find("ul"), 1, show_toc_level)
+    # Add in CSS classes for bootstrap
+    for ul in root.iter_descendants("ul"):
+        ul.attrs["class"] = [*ul.classes, "nav", "section-nav", "flex-column"]
+    for item in root.iter_descendants("li"):
+        item.attrs["class"] = [*item.classes, "nav-item", "toc-entry"]
+        anchor = item.find("a")
+        if anchor is not None:
+            anchor.attrs["class"] = [*anchor.classes, "nav-link"]
+    return root
+
+
+def render_page_toc(root: _Element) -> str:
+    """Serialize a rewritten in-page TOC, dropping a lone page title.
+
+    If the page has a single ``h1`` we assume it is the page title: its own
+    sub-list is returned (and nothing at all if it has no sub-headers, since
+    then there is no TOC worth showing).
+    """
+    titles = [element for element in root.iter_all() if "toc-h1" in element.classes]
+    if len(titles) != 1:
+        return render_toctree(root)
+    title = titles[0]
+    if not any("toc-h2" in element.classes for element in title.iter_all()):
+        return ""
+    sublist = title.find("ul")
+    return "" if sublist is None else render_element(sublist)
 
 
 # -- "current page" markers --------------------------------------------------

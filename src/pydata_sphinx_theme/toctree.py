@@ -17,7 +17,13 @@ from sphinx.application import Sphinx
 from sphinx.environment.adapters.toctree import TocTree
 from sphinx.locale import _
 
-from ._toctree_html import build_template, render_toctree, rewrite_toctree
+from ._toctree_html import (
+    build_template,
+    render_page_toc,
+    render_toctree,
+    rewrite_page_toc,
+    rewrite_toctree,
+)
 from .utils import traverse_or_findall
 
 
@@ -430,53 +436,23 @@ def add_toctree_functions(
         return html
 
     @cache
-    def generate_toc_html(kind: str = "html") -> BeautifulSoup:
-        """Return the within-page TOC links in HTML."""
+    def generate_toc_html(kind: str = "html") -> str | BeautifulSoup:
+        """Return the within-page TOC links in HTML.
+
+        Parameters:
+            kind : "html" to get the TOC as an HTML string (with a lone page
+                title unwrapped), anything else to get the whole rewritten TOC
+                as a BeautifulSoup object.
+        """
         if "toc" not in context:
             return ""
 
-        soup = BeautifulSoup(context["toc"], "html.parser")
-
-        # Add toc-hN + visible classes
-        def add_header_level_recursive(ul, level):
-            if ul is None:
-                return
-            if level <= (context["theme_show_toc_level"] + 1):
-                ul["class"] = [*ul.get("class", []), "pst-show_toc_level"]
-            for li in ul("li", recursive=False):
-                li["class"] = [*li.get("class", []), f"toc-h{level}"]
-                add_header_level_recursive(li.find("ul", recursive=False), level + 1)
-
-        add_header_level_recursive(soup.find("ul"), 1)
-
-        # Add in CSS classes for bootstrap
-        for ul in soup("ul"):
-            ul["class"] = [*ul.get("class", []), "nav", "section-nav", "flex-column"]
-
-        for li in soup("li"):
-            li["class"] = [*li.get("class", []), "nav-item", "toc-entry"]
-            if li.find("a"):
-                a = li.find("a")
-                a["class"] = [*a.get("class", []), "nav-link"]
-
-        # If we only have one h1 header, assume it's a title
-        h1_headers = soup.select(".toc-h1")
-        if len(h1_headers) == 1:
-            title = h1_headers[0]
-            # If we have no sub-headers of a title then we won't have a TOC
-            if not title.select(".toc-h2"):
-                out = ""
-            else:
-                out = title.find("ul")
-        # Else treat the h1 headers as sections
-        else:
-            out = soup
-
-        # Return the toctree object
-        if kind == "html":
-            return out
-        else:
-            return soup
+        root = rewrite_page_toc(
+            context["toc"], show_toc_level=context["theme_show_toc_level"]
+        )
+        if kind != "html":
+            return BeautifulSoup(render_toctree(root), "html.parser")
+        return render_page_toc(root)
 
     def navbar_align_class() -> list[str]:
         """Return the class that aligns the navbar based on config."""
