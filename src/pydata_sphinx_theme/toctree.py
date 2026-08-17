@@ -17,6 +17,7 @@ from sphinx.application import Sphinx
 from sphinx.environment.adapters.toctree import TocTree
 from sphinx.locale import _
 
+from ._toctree_html import build_template, render_toctree, rewrite_toctree
 from .utils import traverse_or_findall
 
 
@@ -338,7 +339,7 @@ def add_toctree_functions(
         This is used for our sidebar, which starts at the second-level page.
 
         It also modifies the generated TocTree slightly for Bootstrap classes
-        and structure (via BeautifulSoup).
+        and structure (see :mod:`pydata_sphinx_theme._toctree_html`).
 
         Arguments are passed to the Sphinx `_get_local_toctree` function
         (`context["toctree"]` below).
@@ -363,6 +364,7 @@ def add_toctree_functions(
                 (if kind == "raw")
         """
         show_nav_level = int(show_nav_level)
+        builder = app.builder
 
         ancestorname = toctree_obj = None
         if startdepth > 0:
@@ -377,18 +379,22 @@ def add_toctree_functions(
                     "developers."
                 )
 
-        # Resolving and soup-ifying the sidebar toctree below is expensive on
+        # Resolving and rewriting the sidebar toctree below is expensive on
         # large sites, so where possible we serve it from a cache instead
-        # (see _sidebar_cache_key for when and _patch_cached_sidebar for how)
+        # (see _sidebar_cache_key for when, and SidebarTemplate for how)
         cache_key = _sidebar_cache_key(
             kind, ancestorname, pagename, show_nav_level, kwargs
         )
         if cache_key is not None:
-            cached_html = _patch_cached_sidebar(
-                app, cache_key, pagename, show_nav_level
-            )
-            if cached_html is not None:
-                return cached_html
+            cached = _sidebar_cache(app).get(cache_key)
+            if cached is not None:
+                template, cached_pagename = cached
+                cached_html = template.render(
+                    builder.get_relative_uri(cached_pagename, pagename),
+                    builder.get_relative_uri(pagename, cached_pagename),
+                )
+                if cached_html is not None:
+                    return cached_html
 
         if startdepth == 0:
             html_toctree = context["toctree"](**kwargs)
@@ -397,62 +403,31 @@ def add_toctree_functions(
             toctree_element = get_nonroot_toctree(
                 app, pagename, ancestorname, toctree_obj, **kwargs
             )
-            html_toctree = app.builder.render_partial(toctree_element)["fragment"]
+            html_toctree = builder.render_partial(toctree_element)["fragment"]
 
-        soup = BeautifulSoup(html_toctree, "html.parser")
+        root = rewrite_toctree(html_toctree, kind=kind, show_nav_level=show_nav_level)
+        html = render_toctree(root)
 
-        # pair "current" with "active" since that's what we use w/ bootstrap
-        for li in soup("li", {"class": "current"}):
-            li["class"].append("active")
+        if cache_key is not None:
+            # `self_href` is where this page's own entry points from a sibling
+            # page in the same directory (in the sidebar it is rendered as "#")
+            self_href = posixpath.basename(builder.get_target_uri(pagename))
+            template = build_template(
+                root, show_nav_level=show_nav_level, self_href=self_href
+            )
+            if template.render(self_href, self_href) == html:
+                # Only cache a template that reproduces this page's own sidebar
+                # exactly. It won't if this page has no entry of its own (e.g.
+                # it was pruned by `maxdepth`), or in the unlikely event that
+                # Sphinx marked entries as "current" that are not on the path to
+                # such an entry -- in both cases every page in this directory
+                # keeps taking the slow path, as it did before the cache existed.
+                _sidebar_cache(app)[cache_key] = (template, pagename)
 
-        # Remove sidebar links to sub-headers on the page
-        for li in soup.select("li"):
-            # Remove
-            if li.find("a"):
-                href = li.find("a")["href"]
-                if "#" in href and href != "#":
-                    li.decompose()
-
-        if kind == "sidebar":
-            # Add bootstrap classes for first `ul` items
-            for ul in soup("ul", recursive=False):
-                ul.attrs["class"] = [*ul.attrs.get("class", []), "nav", "bd-sidenav"]
-
-            # Add collapse boxes for parts/captions.
-            # Wraps the TOC part in an extra <ul> to behave like chapters with toggles
-            # show_nav_level: 0 means make parts collapsible.
-            if show_nav_level == 0:
-                partcaptions = soup.find_all("p", attrs={"class": "caption"})
-                if len(partcaptions):
-                    new_soup = BeautifulSoup(
-                        "<ul class='list-caption'></ul>", "html.parser"
-                    )
-                    for caption in partcaptions:
-                        # Assume that the next <ul> element is the TOC list
-                        # for this part
-                        for sibling in caption.next_siblings:
-                            if sibling.name == "ul":
-                                toclist = sibling
-                                break
-                        li = soup.new_tag("li", attrs={"class": "toctree-l0"})
-                        li.extend([caption, toclist])
-                        new_soup.ul.append(li)
-                    soup = new_soup
-
-            # Add icons and labels for collapsible nested sections
-            add_collapse_checkboxes(soup)
-
-            # Open the sidebar navigation to the proper depth
-            for ii in range(show_nav_level):
-                for details in soup.select(f"li.toctree-l{ii} > details"):
-                    details["open"] = "open"
-
-        if cache_key is not None and soup.find("a", href="#") is not None:
-            # only cache a soup containing this page's own entry (rendered with
-            # href="#") so that a later cache hit can find and demote that entry
-            _sidebar_cache(app)[cache_key] = [pagename, soup]
-
-        return soup
+        if kind == "raw":
+            # downstream themes (e.g. sphinx-book-theme) expect a soup here
+            return BeautifulSoup(html, "html.parser")
+        return html
 
     @cache
     def generate_toc_html(kind: str = "html") -> BeautifulSoup:
@@ -540,9 +515,10 @@ def _sidebar_cache_key(
     `collapse=True`), the resolved toctree has the same structure for every page
     under the same ancestor -- only the "current" markers (`current`/`active`
     classes and open `<details>`) and the relative link targets differ. So the
-    finished soup can be shared by all pages in the same directory (same
+    finished HTML can be shared by all pages in the same directory (same
     relative link targets) below the same ancestor, provided the "current"
-    markers are moved to each page's own toctree entry (_patch_cached_sidebar).
+    markers are moved to each page's own toctree entry
+    (`_toctree_html.SidebarTemplate.render`).
     """
     if kind != "sidebar" or ancestorname is None or kwargs.get("collapse", True):
         return None
@@ -561,105 +537,13 @@ def _sidebar_cache(app: Sphinx) -> dict:
     return app._pst_sidebar_toctree_cache
 
 
-def _patch_cached_sidebar(
-    app: Sphinx, cache_key: tuple, pagename: str, show_nav_level: int
-) -> str | None:
-    """Return this page's sidebar HTML by patching a cached sibling page's soup.
-
-    Return None (and leave the cache unmodified) if no soup is cached under
-    `cache_key` yet, or if the cached soup contains no entry for this page
-    (e.g., it was pruned by `maxdepth`) -- the caller then builds the sidebar
-    the slow way.
-    """
-    cached = _sidebar_cache(app).get(cache_key)
-    if cached is None:
-        return None
-    cached_pagename, cached_soup = cached
-    patched = _move_current_markers(
-        cached_soup,
-        old_href=app.builder.get_relative_uri(pagename, cached_pagename),
-        new_href=app.builder.get_relative_uri(cached_pagename, pagename),
-        show_nav_level=show_nav_level,
-    )
-    if not patched:
-        return None
-    cached[0] = pagename  # the "current" markers are now on this page's entry
-    return str(cached_soup)
-
-
-def _move_current_markers(
-    soup: BeautifulSoup, *, old_href: str, new_href: str, show_nav_level: int
-) -> bool:
-    """Move the "current page" markers in a rendered sidebar toctree.
-
-    ``soup`` was rendered for another page in the same directory, whose entry (as
-    seen from the page at ``new_href``) is at ``old_href``. Relocate the
-    ``current``/``active`` classes and the ``open`` state of ``<details>``
-    disclosure widgets from that page's entry chain to the entry for the page at
-    ``new_href``. Return ``False`` (leaving ``soup`` unmodified) if no entry for
-    ``new_href`` exists.
-    """
-    if old_href == new_href:
-        return True  # same page, nothing to move
-    new_anchors = soup.find_all("a", href=new_href)
-    if not new_anchors:
-        return False
-    # Demote the previous page's entry; its self-link is rendered as href="#"
-    for anchor in soup.find_all("a", href="#"):
-        anchor["href"] = old_href
-        anchor["class"] = [cls for cls in anchor.get("class", []) if cls != "current"]
-        _set_current_chain(anchor, current=False, show_nav_level=show_nav_level)
-    # Promote this page's entry
-    for anchor in new_anchors:
-        anchor["href"] = "#"
-        anchor["class"] = ["current", *anchor.get("class", [])]
-        _set_current_chain(anchor, current=True, show_nav_level=show_nav_level)
-    return True
-
-
-def _set_current_chain(anchor, *, current: bool, show_nav_level: int) -> None:
-    """Add or remove current/active/open markers on an entry's ancestor chain."""
-    for parent in anchor.parents:
-        if parent.name == "li":
-            classes = parent.get("class", [])
-            # `li.toctree-l0` is a wrapper the theme synthesizes around a part's
-            # caption when `show_nav_level=0`; fresh builds never mark it current
-            is_part = "toctree-l0" in classes
-            if not is_part:
-                classes = [cls for cls in classes if cls not in ("current", "active")]
-                if current:
-                    # match the class order of a freshly built toctree, where
-                    # Sphinx adds "current" right after "toctree-l*"
-                    classes[1:1] = ["current", "active"]
-                parent["class"] = classes
-            # Every <details> disclosure widget added by `add_collapse_checkboxes`
-            # is a direct child of an <li> on the chain -- including the current
-            # entry's own <li> (when the current page has child pages), whose
-            # <details> is a *sibling* of `anchor` rather than an ancestor.
-            details = parent.find("details", recursive=False)
-            if details is not None:
-                if current:
-                    # fresh builds give an open part a bare `open` attribute
-                    details["open"] = None if is_part else "open"
-                elif not any(
-                    f"toctree-l{level}" in classes for level in range(show_nav_level)
-                ):
-                    # (keep <details> open where mandated by ``show_nav_level``)
-                    details.attrs.pop("open", None)
-        elif parent.name == "ul":
-            classes = [cls for cls in parent.get("class", []) if cls != "current"]
-            # `ul.list-caption` is the theme-synthesized wrapper around all parts
-            # (`show_nav_level=0`); fresh builds never mark it current
-            if current and "list-caption" not in classes:
-                classes.insert(0, "current")
-            if classes:
-                parent["class"] = classes
-            else:
-                parent.attrs.pop("class", None)
-
-
 def add_collapse_checkboxes(soup: BeautifulSoup) -> None:
-    """Add checkboxes to collapse children in a toctree."""
+    """Add checkboxes to collapse children in a toctree.
+
+    The theme itself no longer uses this (see
+    `_toctree_html._add_collapse_widgets`, which does the same thing without
+    BeautifulSoup); it is kept because downstream themes may import it.
+    """
     # based on https://github.com/pradyunsg/furo
 
     for element in soup.find_all("li", recursive=True):

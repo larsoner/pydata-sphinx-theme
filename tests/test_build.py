@@ -573,35 +573,37 @@ def test_sidebars_show_nav_level0(sphinx_build_factory) -> None:
 def test_sidebar_toctree_cache(
     sphinx_build_factory, make_app, monkeypatch, show_nav_level
 ):
-    """Sidebars patched from the cache must be identical to freshly built ones.
+    """Sidebars served from the cache must be identical to freshly built ones.
 
     With collapse_navigation=False (the default), the sidebar of the second,
     third, ... page written in a given directory is produced by moving the
-    "current" markers within a cached soup of a sibling page's sidebar instead
-    of being resolved from scratch (see generate_toctree_html).
+    "current" markers within a cached sibling page's rendered sidebar instead of
+    being resolved from scratch (see generate_toctree_html).
     """
-    from pydata_sphinx_theme import toctree
+    from pydata_sphinx_theme import _toctree_html
 
     # spy on the cache-hit helper so we know the fast path was really exercised
     hits = []
-    orig = toctree._move_current_markers
+    orig = _toctree_html.SidebarTemplate.render
 
-    def spy(*args, **kwargs):
-        result = orig(*args, **kwargs)
+    def spy(self, *args, **kwargs):
+        result = orig(self, *args, **kwargs)
         hits.append(result)
         return result
 
-    monkeypatch.setattr(toctree, "_move_current_markers", spy)
+    monkeypatch.setattr(_toctree_html.SidebarTemplate, "render", spy)
     confoverrides = {"html_theme_options.show_nav_level": show_nav_level}
     build = sphinx_build_factory("sidebars", confoverrides=confoverrides).build()
-    assert any(hits), "no sidebar was served from the cache"
+    assert any(hit is not None for hit in hits), "no sidebar was served from cache"
     with_cache = {
         path: path.read_text("utf8") for path in sorted(build.outdir.rglob("*.html"))
     }
 
     # build again from scratch with every cache lookup missing (so each page's
     # sidebar is built the slow way) and check that all pages come out identical
-    monkeypatch.setattr(toctree, "_move_current_markers", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        _toctree_html.SidebarTemplate, "render", lambda self, *a, **kw: None
+    )
     app = make_app(srcdir=build.src, confoverrides=confoverrides, freshenv=True)
     app.build()
     for path, cached_html in with_cache.items():
